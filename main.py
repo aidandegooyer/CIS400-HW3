@@ -1,14 +1,19 @@
 import json
+
+import keras
+
 from individual import Individual
 import pandas as pd
 import numpy as np
 import time
-import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import resample
+from sklearn.metrics import accuracy_score
+from scipy.optimize import differential_evolution
 from keras.models import Sequential
 from keras.layers import Dense
+import tensorflow
 
 # HYPERPARAMETERS
 importdata = True
@@ -122,36 +127,6 @@ if importdata:
 # END data parsing ================================================================================================
 
 
-# initialize population. Instantiates pop_size number of individuals, and calculates q from the individual.
-
-def initialize_population(pop_size: int, input_dim):
-    pop_list = []
-    for i in range(pop_size):
-        pop_list.append(Individual(input_dim))
-        pop_list[i].get_weights()
-        pop_list[i].calculate_q(X_train, y_train, b1, b2)
-    pop_list.sort(key=lambda a: a.q)  # sorts population list by q value
-    return pop_list
-
-
-# evolve the population, returns a new generation sorted by q
-def evolve_population(population, mutation_rate):
-    offspring = []
-    for j in range(population_size):
-        parent1 = population[np.random.randint(0, high=4)].get_weights()  # get one of the best 4 parents
-        parent2 = population[np.random.randint(0, high=4)].get_weights()
-        child = []
-        for i in range(len(parent1)):
-            temp = np.mean(np.array([parent1[i], parent2[i]]), axis=0)  # average the parents weights and add  to child
-            child.append(temp)
-        offspring.append(Individual(input_dim))
-        offspring[j].set_weights(child)
-        offspring[j].mutate(mutation_rate)  # mutate child after recombination
-        offspring[j].calculate_q(X_train, y_train, b1, b2)  # run calculations to give child's q
-    # the above line could be run on the whole list in parallel to improve performance. take it out of the loop maybe?
-
-    offspring.sort(key=lambda a: a.q)
-    return offspring
 
 
 def evaluate_model_conf_matrix(x_test, y_test, model):
@@ -166,74 +141,56 @@ def evaluate_model_conf_matrix(x_test, y_test, model):
     conf_matrix = confusion_matrix(y_test, rounded_predictions)  # needs help
     return conf_matrix
 
+def create_model():
+    model = Sequential()
+    model.add(Dense(units=input_dim * 2, activation='sigmoid', input_dim=input_dim))
+    model.add(Dense(units=1, activation='sigmoid'))
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
 
-def evolutionary_strategies(X_train, y_train, mutation_rate, num_generations):
-    best_q_values_trial = []
-    best_q_values_generations = {1: [], 2: [], 4: [], 8: [], 16: [], 32: [], 64: [], 128: [], 256: []}
-    models_with_best_q = [0] * num_experiments
-    last_best_q = 9
-    test_q_vals_per_generation = [0] * num_generations
-    testModel = Individual(input_dim)
+# Define the fitness function (evaluates the performance of the neural network)
+def fitness_function(weights):
+    model = create_model()
+    model.set_weights(weights)
+    model.fit(X_train, y_train, epochs=10, verbose=0)  # Train the model
+    y_pred = (model.predict(X_test) > 0.5).astype(int)  # Make predictions
+    accuracy = accuracy_score(y_test, y_pred)  # Calculate accuracy
+    print(accuracy)
+    return -accuracy  # Minimize (negative of accuracy)
 
-    for experiment_num in range(num_experiments):
-        population = initialize_population(population_size, input_dim)
-        best_q_value_trial = 999999999
+optimized_model_list = []
 
-        for generation in range(num_generations):
-            generational_q = 9999999
-            offspring = evolve_population(population, mutation_rate)
+for i in range(num_experiments):
+    # Initialize the bounds for differential evolution (assuming weights have the same shape as in the model)
+    bounds = [(-1, 1)] * sum(w.size for w in create_model().get_weights())
 
-            for individual in offspring:
-                if individual.q < generational_q:
-                    generational_q = individual.q
-                    generational_model = individual
+    # Perform differential evolution to optimize the weights
+    result = differential_evolution(fitness_function, bounds, maxiter=generations)
 
-                if individual.q < best_q_value_trial:
-                    best_q_value_trial = individual.q
-                    print(f"\n****NEW BEST Q: {individual.q:.2f}****\n\n----------------------------------------------")
-                    models_with_best_q[experiment_num] = individual
+    # Get the optimized weights
+    optimized_weights = result.x
+    optimized_model = create_model()
+    optimized_model.set_weights(optimized_weights)
 
-            if generation in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
-                best_q_values_generations[generation].append(best_q_value_trial)
+    current_individual = Individual()
+    current_individual.set_weights(optimized_weights)
+    current_individual.calculate_q(X_train, y_train, b1, b2)
 
-            population = offspring
+    # Evaluate the optimized model
+    y_pred_optimized = (optimized_model.predict(X_test) > 0.5).astype(int)
+    accuracy_optimized = accuracy_score(y_test, y_pred_optimized)
 
-            # Adapt mutation rate using the modified 1/5 rule
-            if generation % 5 == 0:
-                if abs(generational_q - last_best_q) < 1:
-                    mutation_rate *= 2
-                else:
-                    mutation_rate *= 0.8
-                last_best_q = generational_q
-            if mutation_rate > 10: mutation_rate /= 10
+    optimized_model_list.append(current_individual)
 
-            #evaluate best model of generation
-            testModel.set_weights(generational_model.get_weights())
-            testModel.calculate_q(X_test, y_test, 100, 100)
-            test_q_vals_per_generation[generation] += testModel.q
+# Compare results
+print("Accuracy (optimized model):", accuracy_optimized)
 
-            print(f"\n\nLAST MUTATION EVAL BEST Q = {last_best_q:.2f}")
-            print(f"THIS GENERATION BEST Q = {generational_q:.2f}")
-            print(f"MUTATION RATE = {mutation_rate:.2f}")
-            print(f"GENERATION NUMBER {generation}")
-            print(f"**TEST Q VAL {testModel.q}")
-            print(f"EXPERIMENT NUMBER {experiment_num + 1}\n\n----------------------------------------------")
-
-        best_q_values_trial.append(best_q_value_trial)
-        print( f"**EXPERIMENT NUMBER {experiment_num + 1} COMPLETE**")
-
-    return best_q_values_trial, best_q_values_generations, models_with_best_q, test_q_vals_per_generation
-
-
-population_size = input_dim
-best_qs_trial, q_selected_gens, models_with_best_q, test_q_vals = evolutionary_strategies(X_train, y_train, mutation_rate,
-                                                                             generations)
 print("--- %s seconds ---" % (time.time() - start_time))
 
 file = open("output.txt", "w")
 
 
-for i, model in enumerate(models_with_best_q):
+for i, model in enumerate(optimized_model_list):
     file.write((f"Experiment #{i+1} - Train"))
     conf_matrix = evaluate_model_conf_matrix(X_train, y_train, model)
     file.write(f"\n{conf_matrix}\n")
@@ -245,43 +202,7 @@ for i, model in enumerate(models_with_best_q):
 
 file.write("---------------------\nbest q's in trials\n")
 
-for item in best_qs_trial:
-    file.write(f"\n{item}\n")
+for item in optimized_model_list:
+    file.write(f"\n{item.q}\n")
 
-file.write("---------------------\naverage test q's per generation\n")
-
-outList = [item / num_experiments for item in test_q_vals]
-for item in outList:
-    file.write(str(item))
-    file.write("\n")
-
-file.write("---------------------\n")
-
-file.write(json.dumps(q_selected_gens))
-
-# # Display confusion matrices
-# for i in range(num_experiments):
-#     print(f"Confusion Matrix - Training Data (Experiment {i + 1}):")
-#     print(confusion_matrices_train[i])
-#     print(f"Confusion Matrix - Test Data (Experiment {i + 1}):")
-#     print(confusion_matrices_test[i])
-#
-# # averaging q values per epoch
-# q_train_final = []
-# for x in q_train_avg:
-#     q_train_final.append(x / num_experiments)
-# q_test_final = []
-# for x in q_test_avg:
-#     q_test_final.append(x / num_experiments)
-#
-# plot the graph using matplotlib
-#
-# plt.figure(figsize=(10, 6))
-# plt.plot(np.log(range(1, generations + 1)), q_train_final, label='Training Data')
-# plt.plot(np.log(range(1, generations + 1)), q_test_final, label='Test Data')
-# plt.xlabel('log(Number of Weight Updates)')
-# plt.ylabel('Average q')
-# plt.title('Average q vs. log(Number of Weight Updates)')
-# plt.legend()
-# plt.show()
-#
+file.close()

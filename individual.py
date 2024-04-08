@@ -9,7 +9,6 @@ class Individual:
         self.q = None
         self.input_dim = input_dim
         self.model = Sequential()
-        self.model.add(Dense(units=self.input_dim, activation='sigmoid', input_dim=self.input_dim))
         self.model.add(Dense(units=self.input_dim * 2, activation='sigmoid'))
         self.model.add(Dense(units=1, activation='sigmoid'))
         self.weights = self.model.get_weights()
